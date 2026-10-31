@@ -56,12 +56,12 @@ When it finishes, open:
 - `https://your-address/console/` for the admin console
 
 The staff password is printed by `grep ADMIN_PASSWORD /etc/food-app.env`. Then add your email settings (for sign-in
-codes) and your menu. The full guide is [`food-app/deploy/README.md`](food-app/deploy/README.md).
+codes) and your menu. The full guide is [`business-app/deploy/README.md`](business-app/deploy/README.md).
 
 To update later, run:
 
 ```bash
-WITH_APP=1 bash /srv/food-app/repo/food-app/deploy/update.sh
+WITH_APP=1 bash /srv/food-app/repo/business-app/deploy/update.sh
 ```
 
 ## What it costs you
@@ -73,14 +73,8 @@ The software is free. You still pay for:
 
 ## Run it on your computer (for developers)
 
-See [`food-app/README.md`](food-app/README.md): Next.js 15 with Postgres and PostGIS (API and website), React and
+See [`business-app/README.md`](business-app/README.md): Next.js 15 with Postgres and PostGIS (API and website), React and
 Vite (admin console), and Flutter (customer app).
-
-## The launch video
-
-The launch film is built as code with Remotion, in [`food-app/promo-video`](food-app/promo-video). Change the words,
-render again. The sector screens in it are the real app set up as different businesses. Their photos are free CC0 or
-public-domain pictures, credited in `food-app/promo-video/public/sectors/SOURCES.md`.
 
 ## Demo photos and videos
 

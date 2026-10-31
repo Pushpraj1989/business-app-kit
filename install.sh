@@ -31,4 +31,4 @@ trap 'rm -rf "$src"' EXIT
 git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$src/code"
 
 REPO_URL="$REPO_URL" BRANCH="$BRANCH" DOMAIN="$DOMAIN" WITH_APP="${WITH_APP:-1}" LE_EMAIL="${LE_EMAIL:-}" \
-  bash "$src/code/food-app/deploy/setup.sh"
+  bash "$src/code/business-app/deploy/setup.sh"

@@ -4,9 +4,9 @@ Copyright 2026 Pushpraj1989 and contributors
 Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 Bundled third-party files, each under its own licence (the licence files sit beside them):
-- Fraunces (food-app/mobile/assets/fonts, food-app/web/public/fonts): SIL Open Font License 1.1
+- Fraunces (business-app/mobile/assets/fonts, business-app/web/public/fonts): SIL Open Font License 1.1
 - Noto Sans Arabic (same folders): SIL Open Font License 1.1
 - Roboto (same folders): Apache License 2.0
 
-The demo food photos and video clips in food-app/mobile/assets are AI-generated illustrations for the demo only.
+The demo food photos and video clips in business-app/mobile/assets are AI-generated illustrations for the demo only.
 Replace them with photos of your own products before you open to customers.
