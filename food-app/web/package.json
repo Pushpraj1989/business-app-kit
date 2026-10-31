@@ -1,0 +1,47 @@
+{
+  "name": "food-app-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Single-restaurant ordering: customer web and admin panel (vertical slice on a fake data layer).",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "next dev -p 3100",
+    "build": "next build",
+    "start": "next start -p 3100",
+    "test": "npm run test:unit && npm run test:api && npm run test:db && npm run test:e2e",
+    "test:unit": "node --test test/unit.test.ts test/theme.test.ts test/graph-mail.test.ts test/posters.test.ts",
+    "test:db": "node test/rls.test.mjs",
+    "test:api": "node test/e2e-api.mjs",
+    "test:browser": "node test/browser-flow.mjs",
+    "test:e2e": "playwright test",
+    "db:migrate": "node db/migrate.mjs",
+    "db:reset": "node db/migrate.mjs --reset",
+    "test:access": "node test/rls.test.mjs",
+    "test:accounts": "node --test test/accounts-admin.test.mjs",
+    "test:vouchers": "node --test test/vouchers.test.mjs && node --test test/campaigns.test.ts && node --test test/templates.test.ts && node --test test/print.test.ts && node --test test/wallet.test.ts && node --test test/checkout-offers.test.ts && node --test test/partners.test.ts && node --test test/reporting.test.ts && node --test test/gates.test.ts && node --test test/branding.test.ts && node --test test/staff-login.test.ts && node --test test/home.test.ts && node --test test/assistant.test.ts && node --test test/sales.test.ts && node --test test/retail.test.ts && node --test test/shipping.test.ts && node --test test/returns.test.ts",
+    "verify": "bash scripts/verify.sh"
+  },
+  "dependencies": {
+    "@simplewebauthn/server": "14.0.3",
+    "next": "15.5.28",
+    "nodemailer": "6.9.16",
+    "pg": "^8.13.1",
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.10.1",
+    "@playwright/test": "^1.56.1",
+    "@types/node": "22.10.5",
+    "@types/nodemailer": "6.4.17",
+    "@types/pg": "^8.11.10",
+    "@types/react": "19.0.4",
+    "@types/react-dom": "19.0.2",
+    "typescript": "5.7.2"
+  },
+  "overrides": {
+    "postcss": "8.5.32"
+  }
+}

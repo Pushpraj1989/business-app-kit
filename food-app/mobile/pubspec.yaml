@@ -1,0 +1,50 @@
+name: sample_kitchen
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.7
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  flutter_secure_storage: ^11.2.0
+  flutter_tts: 4.2.3
+  geolocator: ^14.1.2
+  http: ^1.6.0
+  local_auth: ^3.0.2
+  lucide_icons_flutter: ^4.0.1
+  maplibre_gl: ^0.27.1
+  shared_preferences: ^2.5.6
+  video_player: ^2.14.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  fonts:
+    - family: Fraunces
+      fonts:
+        - asset: assets/fonts/Fraunces-Variable.ttf
+    # Body text and Arabic are bundled, so text looks the same on every device and the web build needs no font CDN.
+    - family: Roboto
+      fonts:
+        - asset: assets/fonts/Roboto-Regular.ttf
+        - asset: assets/fonts/Roboto-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Roboto-Bold.ttf
+          weight: 700
+    - family: NotoSansArabic
+      fonts:
+        - asset: assets/fonts/NotoSansArabic-Variable.ttf
+  assets:
+    - assets/images/
+    - assets/images/photo/
+    - assets/video/
+    - assets/demo/

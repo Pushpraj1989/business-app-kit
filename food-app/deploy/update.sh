@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Brings the server up to the latest code on its branch: download, install, migrate, build, restart. Run as root:
+#   bash /srv/food-app/repo/food-app/deploy/update.sh
+# A second copy updates the same way from its own folder, for example bash /srv/food-demo/repo/food-app/deploy/update.sh
+# (see instance.sh); each copy is updated on its own.
+# WITH_APP=1 also rebuilds the customer app for the browser (needs DOMAIN, or reads it from the settings file).
+# The database is migrated in place; restaurant data and uploaded media are kept.
+set -euo pipefail
+
+# Everything is inside main, so bash reads the whole script before running it: the download below replaces this file.
+main() {
+
+# This copy's folders, settings file, service, port and nginx file (ROOT, REPO, DATA, WWW, ENV_FILE, SERVICE, PORT,
+# NGINX_CONF).
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/instance.sh"
+FLUTTER_VERSION=3.47.8
+
+[ "$(id -u)" = 0 ] || { echo "Run this as root (sudo -i first)." >&2; exit 1; }
+as_app() { sudo -u foodapp -H env PATH="/opt/flutter/bin:$PATH" "$@"; }
+say() { printf '\n== %s\n' "$*"; }
+cd /
+
+SELF_COPY="$(mktemp)"; cp "$REPO/food-app/deploy/update.sh" "$SELF_COPY"
+say "Download the latest code"
+BRANCH="$(as_app git -C "$REPO" rev-parse --abbrev-ref HEAD)"
+as_app git -C "$REPO" fetch --quiet origin "$BRANCH"
+as_app git -C "$REPO" reset --quiet --hard "origin/$BRANCH"
+echo "At $(as_app git -C "$REPO" log -1 --format='%h %s')"
+# When the download brought a newer copy of this script, the rest of the update runs from that copy.
+if [ -z "${FOOD_APP_RESTARTED:-}" ] && ! cmp -s "$SELF_COPY" "$REPO/food-app/deploy/update.sh"; then
+  echo "This update script changed; continuing with the new one."
+  FOOD_APP_RESTARTED=1 exec bash "$REPO/food-app/deploy/update.sh" "$@"
+fi
+
+# Uploaded pictures and videos live outside the code folder, so a download never touches them.
+for link in storage data; do
+  target="$REPO/food-app/web/$link"
+  if [ ! -L "$target" ]; then
+    [ -d "$target" ] && as_app cp -a "$target/." "$DATA/$link/" && rm -rf "$target"
+    ln -s "$DATA/$link" "$target" && chown -h foodapp:foodapp "$target"
+  fi
+done
+
+# Settings setup.sh wrote that have gone missing from the file are put back, from the running service where it has them.
+ENV_FILE="$ENV_FILE" INSTANCE="$INSTANCE" bash "$REPO/food-app/deploy/repair-settings.sh"
+
+# Settings added by later versions get their default once; a value already there is never changed.
+grep -q '^STAFF_URL=' "$ENV_FILE" || echo 'STAFF_URL="/console/"' >> "$ENV_FILE"
+
+# The settings are read for the build too (the card payment key is built into the website). They are read the way
+# the service reads them, one NAME=value per line, quotes optional, so a value with spaces or brackets is fine.
+# Windows line endings, spaces before a name and a leading "export " are all accepted.
+while IFS= read -r line || [ -n "$line" ]; do
+  line="${line%$'\r'}"
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line#export }"
+  case "$line" in ''|'#'*) continue ;; esac
+  name="${line%%=*}"; value="${line#*=}"
+  [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+  if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then value="${BASH_REMATCH[1]}"; fi
+  export "$name=$value"
+done < "$ENV_FILE"
+# The domain: from DOMAIN if given, else PUBLIC_URL, else the name nginx already answers for this site. A missing
+# PUBLIC_URL line is written back so the next update finds it.
+PUBLIC_URL="${PUBLIC_URL:-}"
+DOMAIN="${DOMAIN:-${PUBLIC_URL#https://}}"
+if [ -z "$DOMAIN" ] && [ -f "$NGINX_CONF" ]; then
+  DOMAIN="$(awk '$1 == "server_name" { gsub(/;/, "", $2); print $2; exit }' "$NGINX_CONF")"
+fi
+if [ -n "$DOMAIN" ] && ! grep -q '^[[:space:]]*\(export \)\{0,1\}PUBLIC_URL=.' "$ENV_FILE"; then
+  echo "PUBLIC_URL=\"https://$DOMAIN\"" >> "$ENV_FILE"
+  echo "Added PUBLIC_URL for $DOMAIN to $ENV_FILE."
+fi
+for required in DATABASE_URL ADMIN_PASSWORD; do
+  if [ -z "${!required:-}" ]; then
+    echo "$ENV_FILE has no $required line. It was written by setup.sh; restore it from your backup of that file." >&2
+    exit 1
+  fi
+done
+export NODE_ENV=production
+
+say "Website and API: install, migrate, build"
+cd "$REPO/food-app/web"
+as_app npm ci --no-audit --no-fund --include=dev
+as_app env DATABASE_URL="$DATABASE_URL" node db/migrate.mjs
+# Video posters (a still shown at once while a video loads) are made with ffmpeg.
+command -v ffmpeg >/dev/null || { apt-get update -y >/dev/null; apt-get install -y ffmpeg >/dev/null; }
+as_app node --experimental-strip-types --no-warnings scripts/make-posters.ts || echo "Posters could not be made; videos still play."
+as_app env NODE_ENV=production NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY="${NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY:-}" npx next build
+
+say "Admin console: build"
+cd "$REPO/food-app/admin"
+as_app npm ci --no-audit --no-fund --include=dev
+as_app npx vite build --base /console/ --logLevel warn
+rsync -a --delete "$REPO/food-app/admin/dist/" "$WWW/console/"
+
+if [ "${WITH_APP:-0}" = 1 ]; then
+  say "Customer app for the browser: build"
+  # Flutter unpacks its own tools on first use and needs these to do it.
+  for tool in unzip xz; do command -v "$tool" >/dev/null || { apt-get update -y >/dev/null; apt-get install -y unzip xz-utils zip >/dev/null; break; }; done
+  if [ ! -x /opt/flutter/bin/flutter ]; then
+    install -d -o foodapp -g foodapp /opt/flutter
+    as_app git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git /opt/flutter
+  fi
+  cd "$REPO/food-app/mobile"
+  as_app flutter --disable-analytics >/dev/null 2>&1 || true
+  as_app flutter pub get >/dev/null
+  # No offline cache (--pwa-strategy=none), so a phone never keeps showing an old copy after an update.
+  as_app flutter build web --release --no-web-resources-cdn --pwa-strategy=none --no-wasm-dry-run --base-href /app/ --dart-define=API_BASE="https://$DOMAIN"
+  as_app node tool/slim_web.mjs build/web
+  rsync -a --delete "$REPO/food-app/mobile/build/web/" "$WWW/app/"
+fi
+# Compressed copies for nginx to send (gzip_static): rsync --delete removed the old ones, so they are made afresh.
+find "$WWW/console" "$WWW/app" -type f \( -name '*.js' -o -name '*.wasm' -o -name '*.json' -o -name '*.css' -o -name '*.html' -o -name '*.otf' -o -name '*.ttf' -o -name '*.svg' \) \
+  ! -name '*.symbols' -size +1k -exec gzip -9 -k -f {} + 2>/dev/null || true
+chmod -R a+rX "$WWW"
+
+say "Web server"
+# The nginx file follows the code too. A config nginx refuses is put back as it was.
+CONF="$NGINX_CONF"
+if [ -n "$DOMAIN" ] && [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+  cp "$CONF" "$CONF.previous" 2>/dev/null || true
+  render_template "$REPO/food-app/deploy/nginx-https.conf" > "$CONF"
+  if nginx -t 2>/dev/null; then systemctl reload nginx; echo "Updated."
+  else echo "nginx refused the new file; kept the old one." >&2; mv "$CONF.previous" "$CONF"; fi
+fi
+
+say "Restart"
+systemctl restart "$SERVICE"
+for i in $(seq 1 30); do
+  if curl -fs -o /dev/null "http://127.0.0.1:$PORT/v1/brand"; then break; fi
+  sleep 1
+done
+if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/v1/brand"; then
+  echo "Running ($INSTANCE)."
+else
+  echo "The service did not answer. See: journalctl -u $SERVICE -n 50" >&2
+  exit 1
+fi
+
+# Which settings are set and which are empty, without showing any value.
+echo
+ENV_FILE="$ENV_FILE" bash "$REPO/food-app/deploy/check-settings.sh"
+echo
+echo "After changing $ENV_FILE: systemctl restart $SERVICE"
+}
+main "$@"
+exit

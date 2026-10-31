@@ -1,0 +1,108 @@
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sample_kitchen/app.dart';
+import 'auth_fakes.dart';
+import 'helpers.dart';
+import 'package:sample_kitchen/auth/auth_api.dart';
+import 'package:sample_kitchen/auth/biometrics.dart';
+import 'package:sample_kitchen/core/api.dart';
+import 'package:sample_kitchen/widgets/app_button.dart';
+
+MockClient _router({int menuStatus = 200}) => MockClient((request) async {
+      if (request.url.path == '/v1/cart') return respond(jsonEncode({'currency': 'AED', 'lines': [], 'quote': null, 'problem': null}), 200);
+      if (request.url.path == '/v1/auth/me') return respond(jsonEncode({'account': {'id': 'a', 'name': 'Sara', 'phone': '+971501234567', 'email': 'sara@example.com', 'emailVerified': true}}), 200);
+      return respond(jsonEncode(menuPayload()), menuStatus);
+    });
+
+ApiClient _api(MockClient client, SharedPreferences prefs) => ApiClient(baseUrl: 'http://api.test', client: client, prefs: prefs);
+
+void main() {
+  setUp(() => SharedPreferences.setMockInitialValues({}));
+
+  testWidgets('the menu shows items with prices, a sold-out item has no Add button', (tester) async {
+    final prefs = await SharedPreferences.getInstance();
+    final api = _api(_router(), prefs);
+    await tester.pumpWidget(SampleKitchenApp(openingTime: Duration.zero, apiBase: 'http://api.test', api: api, auth: AuthApi(baseUrl: 'http://api.test', client: _router()), sessions: signedInStore(), biometrics: FakeBiometricGate(available: false)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(navTab('Menu'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Grilled chicken plate'), findsWidgets);
+    expect(find.text('AED 45.00'), findsWidgets);
+    expect(find.text('Sold out'), findsOneWidget);
+    expect(find.text('Add: Beef kebab'), findsNothing);
+  });
+
+  testWidgets('switching to Arabic flips the layout to right-to-left and shows Arabic labels', (tester) async {
+    final prefs = await SharedPreferences.getInstance();
+    final api = _api(_router(), prefs);
+    await tester.pumpWidget(SampleKitchenApp(openingTime: Duration.zero, apiBase: 'http://api.test', api: api, auth: AuthApi(baseUrl: 'http://api.test', client: _router()), sessions: signedInStore(), biometrics: FakeBiometricGate(available: false)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('العربية').first);
+    await tester.pumpAndSettle();
+    expect(find.text('الرئيسية'), findsWidgets, reason: 'the bottom bar and the home title');
+
+    await tester.tap(navTab('القائمة'));
+    await tester.pumpAndSettle();
+    // The category shows in the category bar and as its section heading.
+    expect(find.text('الأطباق الرئيسية'), findsNWidgets(2));
+    expect(find.text('نفدت الكمية'), findsOneWidget);
+    final direction = Directionality.of(tester.element(find.text('الأطباق الرئيسية').first));
+    expect(direction, TextDirection.rtl);
+  });
+
+  testWidgets('a failed menu load shows a message and a retry button', (tester) async {
+    final prefs = await SharedPreferences.getInstance();
+    final api = _api(_router(menuStatus: 500), prefs);
+    await tester.pumpWidget(SampleKitchenApp(openingTime: Duration.zero, apiBase: 'http://api.test', api: api, auth: AuthApi(baseUrl: 'http://api.test', client: _router()), sessions: signedInStore(), biometrics: FakeBiometricGate(available: false)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(navTab('Menu'));
+    await tester.pumpAndSettle();
+    expect(find.text('Something went wrong. Please try again.'), findsOneWidget);
+    expect(find.text('Try again'), findsOneWidget);
+  });
+
+  testWidgets('customise: remove a widget, add another, confirm, and the change is kept', (tester) async {
+    // The customise sheet with every row needs more height than the default test window.
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    final prefs = await SharedPreferences.getInstance();
+    final api = _api(_router(), prefs);
+    await tester.pumpWidget(SampleKitchenApp(openingTime: Duration.zero, apiBase: 'http://api.test', api: api, auth: AuthApi(baseUrl: 'http://api.test', client: _router()), sessions: signedInStore(), biometrics: FakeBiometricGate(available: false)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(AppButton, 'Customise'));
+    await tester.pumpAndSettle();
+
+    // Shown list: quick actions, cart, popular. Remove the last one, then add the active order widget.
+    await tester.tap(find.widgetWithText(AppButton, 'Remove').last);
+    await tester.pumpAndSettle();
+    // Only the buttons in the sheet: the dish cards behind it also say Add, and tapping one would close the sheet.
+    await tester.tap(find.descendant(of: find.byType(BottomSheet), matching: find.widgetWithText(AppButton, 'Add')).first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(AppButton, 'Confirm'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Popular on the menu'), findsNothing, reason: 'the removed widget is gone');
+    await expectOnHome(tester, 'Active order');
+    expect(prefs.getString('dashboard_layout'), isNot(contains('"popular"')));
+  });
+
+  testWidgets('a button keeps a 48 px tap target even when it looks smaller', (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(body: AppButton(label: 'Small', size: ButtonSize.sm, onPressed: () {})),
+    ));
+    final hit = tester.getSize(find.byType(InkWell));
+    expect(hit.height, greaterThanOrEqualTo(48));
+    final visual = tester.getSize(find.byType(Container).last);
+    expect(visual.height, 32);
+  });
+}

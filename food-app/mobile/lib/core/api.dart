@@ -1,0 +1,310 @@
+import 'dart:convert';
+import 'dart:math';
+
+import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'geo.dart';
+import 'models.dart';
+
+/// Talks to the same /v1 API as the web app. The guest cookie is kept on the device and sent back on every call,
+/// the way a browser does. The server only ever stores its hash.
+class ApiClient {
+  ApiClient({required this.baseUrl, http.Client? client, this.prefs}) : _client = client ?? http.Client() {
+    MediaUrls.base = baseUrl;
+  }
+
+  final String baseUrl;
+  final http.Client _client;
+  SharedPreferences? prefs;
+  String? _guestCookie;
+  /// The customer's sign-in token, once signed in. Sent as a bearer token on the customer's own requests.
+  String? accessToken;
+
+  /// Goes up by one each time the cart changes, so a screen that shows the cart can reload it.
+  final ValueNotifier<int> cartChanges = ValueNotifier<int>(0);
+
+  static const _cookieKey = 'guest_cookie';
+
+  Future<void> init() async {
+    prefs ??= await SharedPreferences.getInstance();
+    _guestCookie = prefs!.getString(_cookieKey);
+  }
+
+  Map<String, String> _headers({bool json = false}) {
+    final headers = <String, String>{'Accept': 'application/json'};
+    if (json) headers['Content-Type'] = 'application/json';
+    if (_guestCookie != null) headers['Cookie'] = 'guest=$_guestCookie';
+    if (accessToken != null) headers['Authorization'] = 'Bearer $accessToken';
+    return headers;
+  }
+
+  Future<Map<String, dynamic>> _send(Future<http.Response> Function() call) async {
+    final response = await call();
+    final setCookie = response.headers['set-cookie'];
+    if (setCookie != null) {
+      final match = RegExp(r'guest=([^;]+)').firstMatch(setCookie);
+      if (match != null) {
+        _guestCookie = match.group(1);
+        await prefs?.setString(_cookieKey, _guestCookie!);
+      }
+    }
+    // Always UTF-8: menus and orders carry Arabic text, and a missing charset must not turn it into mojibake.
+    final text = utf8.decode(response.bodyBytes);
+    final body = text.isEmpty ? <String, dynamic>{} : jsonDecode(text) as Map<String, dynamic>;
+    if (response.statusCode >= 400) {
+      final error = (body['error'] as Map<String, dynamic>?) ?? {};
+      throw ApiException(error['code'] as String? ?? 'http_${response.statusCode}', error['message'] as String? ?? 'Something went wrong.');
+    }
+    return body;
+  }
+
+  Uri _uri(String path, [Map<String, String>? query]) => Uri.parse('$baseUrl$path').replace(queryParameters: query);
+
+  Future<Menu> menu() async {
+    final body = await _send(() => _client.get(_uri('/v1/menu'), headers: _headers()));
+    return Menu.fromJson(body);
+  }
+
+  Future<Map<String, dynamic>> cart({String channel = 'delivery'}) =>
+      _send(() => _client.get(_uri('/v1/cart', {'channel': channel}), headers: _headers()));
+
+  Future<Map<String, dynamic>> saveCart(List<CartLine> lines, {String channel = 'delivery'}) => _sendCart(() => _client.put(
+        _uri('/v1/cart'),
+        headers: _headers(json: true),
+        body: jsonEncode({
+          'channel': channel,
+          'items': lines.map((l) => {'itemId': l.itemId, if (l.variantId != null) 'variantId': l.variantId, 'qty': l.qty, 'note': l.note}).toList(),
+        }),
+      ));
+
+  Future<List<CartLine>> cartLines() async {
+    final body = await cart();
+    return (body['lines'] as List<dynamic>).map((l) => CartLine.fromJson(l as Map<String, dynamic>)).toList();
+  }
+
+  /// The courier shipping options on offer (shops); empty when the business does not ship.
+  Future<List<ShippingRate>> shippingRates() async {
+    final body = await _send(() => _client.get(_uri('/v1/shipping-rates'), headers: _headers()));
+    return [for (final r in (body['rates'] as List<dynamic>? ?? const [])) ShippingRate.fromJson(r as Map<String, dynamic>)];
+  }
+
+  Future<QuoteResult> quote(String channel, {String? addressId, String? shippingRateId}) async {
+    final body = await _send(() => _client.post(
+          _uri('/v1/checkout/quote'),
+          headers: _headers(json: true),
+          body: jsonEncode({'channel': channel, 'addressId': addressId, 'shippingRateId': ?shippingRateId}),
+        ));
+    return QuoteResult(
+      quote: Quote.fromJson(body['quote'] as Map<String, dynamic>),
+      delivery: body['delivery'] == null ? null : DeliveryQuote.fromJson(body['delivery'] as Map<String, dynamic>),
+      offer: body['offer'] == null ? null : CartOffer.fromJson(body['offer'] as Map<String, dynamic>),
+    );
+  }
+
+  Future<PlacedOrder> placeOrder({required String channel, required String method, String? addressId, String? shippingRateId, required String idempotencyKey}) async {
+    final body = await _send(() => _client.post(
+          _uri('/v1/orders'),
+          headers: _headers(json: true),
+          body: jsonEncode({'channel': channel, 'method': method, 'addressId': addressId, 'shippingRateId': ?shippingRateId, 'idempotencyKey': idempotencyKey}),
+        ));
+    final placed = PlacedOrder.fromJson(body['order'] as Map<String, dynamic>);
+    await prefs?.setString('last_order_id', placed.id);
+    return placed;
+  }
+
+  /// The most recent order placed from this device, for the dashboard's tracking widget.
+  String? get lastOrderId => prefs?.getString('last_order_id');
+
+  /// Address search through the server. Results are labels with coordinates; the provider is not called from the app.
+  Future<List<Place>> placeSearch(String query, {String locale = 'en'}) async {
+    final body = await _send(() => _client.get(_uri('/v1/places/search', {'q': query}), headers: _headers()));
+    return (body['places'] as List<dynamic>).map((p) => Place.fromJson(p as Map<String, dynamic>)).toList();
+  }
+
+  /// The label for a pinned point, or null when the map has no name for it.
+  Future<Place?> placeAt(GeoPoint point) async {
+    final body = await _send(() => _client.get(_uri('/v1/places/reverse', {'lat': '${point.lat}', 'lng': '${point.lng}'}), headers: _headers()));
+    return body['place'] == null ? null : Place.fromJson(body['place'] as Map<String, dynamic>);
+  }
+
+  Future<List<SavedAddress>> addresses() async {
+    final body = await _send(() => _client.get(_uri('/v1/addresses'), headers: _headers()));
+    return (body['addresses'] as List<dynamic>).map((a) => SavedAddress.fromJson(a as Map<String, dynamic>)).toList();
+  }
+
+  Future<SavedAddress> saveAddress(Map<String, dynamic> fields) async {
+    final body = await _send(() => _client.post(_uri('/v1/addresses'), headers: _headers(json: true), body: jsonEncode(fields)));
+    return SavedAddress.fromJson(body['address'] as Map<String, dynamic>);
+  }
+
+  Future<void> deleteAddress(String id) => _send(() => _client.delete(_uri('/v1/addresses/$id'), headers: _headers()));
+
+  Future<List<DeliveryZone>> deliveryZones() async {
+    final body = await _send(() => _client.get(_uri('/v1/delivery-zones'), headers: _headers()));
+    return (body['zones'] as List<dynamic>).map((z) => DeliveryZone.fromJson(z as Map<String, dynamic>)).toList();
+  }
+
+  Future<MembershipState> membership() async {
+    final body = await _send(() => _client.get(_uri('/v1/membership'), headers: _headers()));
+    return MembershipState.fromJson(body);
+  }
+
+  /// How much the customer has saved on their orders, in minor units: the discounts on orders that went ahead.
+  Future<int> savings() async {
+    final body = await _send(() => _client.get(_uri('/v1/orders'), headers: _headers()));
+    return (body['savedMinor'] as num?)?.toInt() ?? 0;
+  }
+
+  Future<List<OrderHistory>> orderHistory() async {
+    final body = await _send(() => _client.get(_uri('/v1/orders'), headers: _headers()));
+    return (body['orders'] as List<dynamic>).map((o) => OrderHistory.fromJson(o as Map<String, dynamic>)).toList();
+  }
+
+  /// The customer's saved vouchers, grouped by what they can still be used for.
+  Future<Wallet> wallet() async {
+    final body = await _send(() => _client.get(_uri('/v1/me/vouchers'), headers: _headers()));
+    return Wallet.fromJson(body);
+  }
+
+  /// Saves a voucher by its code. Saving does not use it.
+  Future<WalletVoucher> saveVoucher(String code) async {
+    final body = await _send(() => _client.post(_uri('/v1/me/vouchers'), headers: _headers(json: true), body: jsonEncode({'code': code})));
+    return WalletVoucher.fromJson(body['voucher'] as Map<String, dynamic>);
+  }
+
+  Future<void> removeVoucher(String voucherId) async {
+    await _send(() => _client.delete(_uri('/v1/me/vouchers/$voucherId'), headers: _headers()));
+  }
+
+  /// Puts a voucher or offer code on the cart. The server says why it cannot apply, and the message is shown as is.
+  Future<Map<String, dynamic>> applyCartCode(String code, {String channel = 'delivery'}) async {
+    return _send(() => _client.put(_uri('/v1/cart/offer'), headers: _headers(json: true), body: jsonEncode({'code': code, 'channel': channel})));
+  }
+
+  Future<void> removeCartCode() async {
+    await _send(() => _client.delete(_uri('/v1/cart/offer'), headers: _headers()));
+  }
+
+  Future<HomePromotions>? _homeAhead;
+
+  /// Starts loading the home's promotions early, during the opening animation; the home screen then has them at once.
+  Future<HomePromotions> prefetchHomePromotions() {
+    final ahead = _homeAhead ??= _fetchHomePromotions();
+    ahead.ignore(); // A failure here is handled when the home screen asks.
+    return ahead;
+  }
+
+  /// The hero and mid-feed promotions staff have published, live now.
+  Future<HomePromotions> homePromotions() async {
+    final ahead = _homeAhead;
+    _homeAhead = null;
+    if (ahead != null) {
+      try {
+        return await ahead;
+      } catch (_) {
+        // Fetched early and failed: ask again.
+      }
+    }
+    return _fetchHomePromotions();
+  }
+
+  Future<HomePromotions> _fetchHomePromotions() async {
+    final body = await _send(() => _client.get(_uri('/v1/home'), headers: _headers()));
+    return HomePromotions.fromJson(body);
+  }
+
+  Future<HomeShortcuts> homeShortcuts() async {
+    final body = await _send(() => _client.get(_uri('/v1/customer/home'), headers: _headers()));
+    return HomeShortcuts.fromJson(body);
+  }
+
+  Future<void> setFavourite(String itemId, bool on) => _send(() => on
+      ? _client.put(_uri('/v1/favourites/$itemId'), headers: _headers())
+      : _client.delete(_uri('/v1/favourites/$itemId'), headers: _headers()));
+
+  Future<ReorderResult> reorder(String orderId) async {
+    final body = await _send(() => _client.post(_uri('/v1/orders/$orderId/reorder'), headers: _headers()));
+    cartChanges.value++;
+    return ReorderResult.fromJson(body);
+  }
+
+  Future<PlacedOrder> order(String id) async {
+    final body = await _send(() => _client.get(_uri('/v1/orders/$id'), headers: _headers()));
+    return PlacedOrder.fromJson(body['order'] as Map<String, dynamic>);
+  }
+
+  /// Asks for a return (shops): which lines and how many, and why.
+  Future<void> requestReturn(String orderId, {required List<({String lineId, int qty})> lines, required String reason}) async {
+    await _send(() => _client.post(
+          _uri('/v1/orders/$orderId/returns'),
+          headers: _headers(json: true),
+          body: jsonEncode({'reason': reason, 'lines': [for (final l in lines) {'lineId': l.lineId, 'qty': l.qty}]}),
+        ));
+  }
+
+  /// Asks the restaurant assistant. Sends the question only; the reply's cards are data the server checked.
+  /// [history] is the earlier turns, so the assistant can follow on ("an order", "add two of those").
+  Future<AssistantReply> ask(String message, {String locale = 'en', List<({String role, String text})> history = const []}) async {
+    final body = await _send(() => _client.post(_uri('/v1/ai/ask'), headers: _headers(json: true), body: jsonEncode({
+          'message': message,
+          'locale': locale,
+          'history': [for (final h in history) {'role': h.role, 'text': h.text}],
+        })));
+    return AssistantReply.fromJson(body);
+  }
+
+  /// Rates a delivered or collected order from 1 to 5 stars. Rating again replaces the earlier rating.
+  Future<void> rateOrder(String orderId, int stars, {String comment = ''}) =>
+      _send(() => _client.put(_uri('/v1/orders/$orderId/rating'), headers: _headers(json: true), body: jsonEncode({'stars': stars, 'comment': comment})));
+
+  /// Adds one of an item, the same way the web app does: read the cart, change it, write it back.
+  /// Sends a cart change and tells the screens that show the cart.
+  Future<Map<String, dynamic>> _sendCart(Future<http.Response> Function() call) async {
+    final body = await _send(call);
+    cartChanges.value++;
+    return body;
+  }
+
+  /// Adds [qty] of a dish with an optional note for the kitchen. A dish already in the cart gets the extra quantity;
+  /// a note replaces the line's note only when one is given.
+  /// A product sold in options needs the chosen [variantId]; each option is its own line.
+  Future<void> addToCart(String itemId, {String? variantId, int qty = 1, String note = ''}) async {
+    final lines = await cartLines();
+    final updated = <CartLine>[];
+    var found = false;
+    for (final line in lines) {
+      if (line.itemId == itemId && line.variantId == variantId) {
+        updated.add(line.copyWith(qty: (line.qty + qty).clamp(1, 20), note: note.isEmpty ? null : note));
+        found = true;
+      } else {
+        updated.add(line);
+      }
+    }
+    if (!found) updated.add(CartLine(itemId: itemId, variantId: variantId, qty: qty.clamp(1, 20), note: note, name: null, unitMinor: null, soldOut: false));
+    await saveCart(updated);
+  }
+
+  Future<void> addOne(String itemId, {String? variantId}) async {
+    final lines = await cartLines();
+    final updated = <CartLine>[];
+    var found = false;
+    for (final line in lines) {
+      if (line.itemId == itemId && line.variantId == variantId) {
+        updated.add(line.copyWith(qty: line.qty + 1));
+        found = true;
+      } else {
+        updated.add(line);
+      }
+    }
+    if (!found) updated.add(CartLine(itemId: itemId, variantId: variantId, qty: 1, note: '', name: null, unitMinor: null, soldOut: false));
+    await saveCart(updated);
+  }
+}
+
+/// A random key per checkout visit. A double tap reuses it, so the server returns the same order.
+String newIdempotencyKey() {
+  final random = Random.secure();
+  return List.generate(16, (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
+}
